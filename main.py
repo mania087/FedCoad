@@ -30,8 +30,8 @@ def get_args():
     parser.add_argument('--unlabeled_portion', type=float, default=0.0, help='portion of unlabeld data')
     parser.add_argument('--max_samples', type=int, default=None, help='max number of samples to use for training')
     parser.add_argument('--max_num_drop_class', type=int, default=0, help='max number of dropped class for training')
-    parser.add_argument('--alg', type=str, default='moon',
-                        help='communication strategy: fedavg/centralized/scaffold/fedprox/moon')
+    parser.add_argument('--alg', type=str, default='fedcoad',
+                        help='communication strategy: fedavg/centralized/fedprox/fedcoad')
     parser.add_argument('--comm_round', type=int, default=100, help='number of maximum communication roun')
     parser.add_argument('--n_class', type=int, default=6, help='number of class available')
     parser.add_argument('--init_seed', type=int, default=0, help="Random seed")
@@ -43,7 +43,7 @@ def get_args():
     parser.add_argument('--log_file_name', type=str, default=None, help='The log file name')
     parser.add_argument('--optimizer', type=str, default='adam', help='the optimizer')
     parser.add_argument('--normalization', type=str, default='pass', help='normalization option: [pass, zscore, minmax]')
-    parser.add_argument('--mu', type=float, default=1, help='the mu parameter for fedprox or moon')
+    parser.add_argument('--mu', type=float, default=1, help='the mu parameter for fedprox or fedcoad')
     parser.add_argument('--temperature', type=float, default=0.5, help='the temperature parameter for contrastive loss')
     parser.add_argument('--model_buffer_size', type=int, default=1, help='store how many previous models for contrastive loss')
     parser.add_argument('--sample_fraction', type=float, default=1.0, help='how many clients are sampled in each round')
@@ -241,8 +241,8 @@ if __name__ == '__main__':
         for key in moment_v:
             moment_v[key] = 0
                                 
-    if args.alg == 'proposed_moon_scaffold':
-        logger.info(f"training algorithm: Proposed Moon+Scaffold method")
+    if args.alg == 'fedcoad':
+        logger.info(f"training algorithm: FedCoad")
         
         # initialize c_global
         c_global = create_model(args.n_class)
@@ -374,142 +374,6 @@ if __name__ == '__main__':
             # update previous model
             for client in clients_this_round.values():
                 client.previous_model.load_state_dict(client.model.state_dict())
-            
-    elif args.alg == 'moon':
-        logger.info(f"training algorithm: Moon")
-        
-        # initialize previous model
-        for client in train_clients.values():
-            #client.previous_model = TCNModel(num_inputs=3, num_channels=[64,128,256], num_class=args.n_class, kernel_size=3)
-            client.previous_model = create_model(args.n_class)
-            client.previous_model.eval()
-            for param in client.previous_model.parameters():
-                param.requires_grad = False
-            client.previous_model.load_state_dict(client.model.state_dict())
-            
-        for round in range(n_comm_rounds):
-            logger.info("in comm round:" + str(round))
-            print("in comm round:" + str(round))
-            party_list_this_round = party_list_rounds[round]
-
-            global_model.eval()
-            for param in global_model.parameters():
-                param.requires_grad = False
-            global_w = global_model.state_dict()
-            
-            if args.server_momentum:
-                old_w = copy.deepcopy(global_model.state_dict())
-
-            clients_this_round = {k: train_clients[k] for k in party_list_rounds[round]}
-            
-            # update local model with global model
-            train_results = []
-            test_results = []
-            # apply lr scheduler to avoid gradient explode
-            if args.scheduler:
-                args.lr = schedule_learning_rate(args.lr, round, args.scheduler_epoch)
-            for client in clients_this_round.values():
-                logger.info(f"local training client {client.id}..")
-                print(f"local training client {client.id}..")
-                client.model.load_state_dict(global_w)
-                # do local training
-                trainacc,testacc = client.local_train_net(args, global_model, loss_fn=loss_fn, round=round)
-                train_results.append(trainacc)
-                test_results.append(testacc)
-            
-            logger.info("done local training " + str(round))
-            print("done local training "+ str(round))
-            
-            logger.info(f'Average train results: {dict_mean(train_results)}')
-            logger.info(f'Average test results: {dict_mean(test_results)}')
-            
-            # do averaging for the global model
-            total_data_points = sum([len(client)for client in clients_this_round.values()])
-            fed_avg_freqs = [len(client)/ total_data_points for client in clients_this_round.values()]
-
-            for net_id, client in enumerate(clients_this_round.values()):
-                net_para = client.model.state_dict()
-                if net_id == 0:
-                    for key in net_para:
-                        global_w[key] = net_para[key] * fed_avg_freqs[net_id]
-                else:
-                    for key in net_para:
-                        global_w[key] += net_para[key] * fed_avg_freqs[net_id]
-
-            if args.server_momentum:
-                delta_w = copy.deepcopy(global_w)
-                for key in delta_w:
-                    delta_w[key] = old_w[key] - global_w[key]
-                    moment_v[key] = args.server_momentum * moment_v[key] + (1-args.server_momentum) * delta_w[key]
-                    global_w[key] = old_w[key] - moment_v[key]
-            
-            # update global model  
-            global_model.load_state_dict(global_w)
-            
-            logger.info(f'global n_test: {len(server_test_dataloader.sampler)}')
-            global_model.to(args.device)
-            train_global_results, train_conf_matrix = test(global_model, server_train_dataloader, get_confusion_matrix=True, loss_fn=loss_fn, device=device)
-            test_global_results, test_conf_matrix = test(global_model, server_test_dataloader, get_confusion_matrix=True, loss_fn=loss_fn, device=device)
-            global_model.to('cpu')
-            
-            logger.info(f">> Global Model Test results: {test_global_results}")
-            print(f">> Global Model Test results: {test_global_results}")
-            logger.info(f">> Global Model Train results: {train_global_results}")
-            print(f">> Global Model Train results: {train_global_results}")
-            
-            # save metrics
-            metrics_recorder.save_metric(test_global_results ,dict_mean(test_results))
-            
-            # record best f1
-            if best_f1< test_global_results["f1"]:
-                best_f1 = test_global_results["f1"]
-            
-            valid_loss = test_global_results["loss"]
-            if valid_loss <= valid_loss_min:
-                print('Validation loss decreased ({:.6f} --> {:.6f}).  Saving model ...'.format(
-                valid_loss_min,
-                valid_loss))
-                torch.save(global_model.state_dict(), f'models/{args.dataset}_{args.alg}.pt')
-                valid_loss_min = valid_loss
-            
-            logger.info("updating previous models")
-            print("updating previous models")
-            # update previous model
-            for client in clients_this_round.values():
-                client.previous_model.load_state_dict(client.model.state_dict())
-                
-    elif args.alg == 'centralized':
-        logger.info(f"training algorithm: Centralized")
-        
-        for round in range(n_comm_rounds):
-            logger.info("in comm round:" + str(round))
-            print("in comm round:" + str(round))
-            
-            # do training
-            # apply lr scheduler to avoid gradient explode
-            if args.scheduler:
-                args.lr = schedule_learning_rate(args.lr, round, args.scheduler_epoch)
-            train(global_model,server_train_dataloader, args.lr, args.optimizer, args,round, loss_fn, device)
-            # do evaluation
-            global_model.to(device)
-            test_global_results, test_conf_matrix = test(global_model, server_test_dataloader, get_confusion_matrix=True, loss_fn=loss_fn, device=device)
-            global_model.to('cpu')
-            logger.info(f">> Global Model Test results: {test_global_results}")
-            print(f">> Global Model Test results: {test_global_results}")
-            
-            # save metrics
-            metrics_recorder.save_metric(test_global_results)
-            # record best f1
-            if best_f1< test_global_results["f1"]:
-                best_f1 = test_global_results["f1"]
-            
-            valid_loss = test_global_results["loss"]
-            if valid_loss <= valid_loss_min:
-                print('Validation loss decreased ({:.6f} --> {:.6f}).  Saving model ...'.format(
-                valid_loss_min,
-                valid_loss))
-                torch.save(global_model.state_dict(), f'models/{args.dataset}_{args.alg}.pt')
-                valid_loss_min = valid_loss
                 
     elif args.alg == 'fedavg':
         logger.info(f"training algorithm: FedAvg")
@@ -728,125 +592,6 @@ if __name__ == '__main__':
                 torch.save(global_model.state_dict(), f'models/{args.dataset}_{args.alg}.pt')
                 valid_loss_min = valid_loss
                 
-    elif args.alg == 'scaffold':
-        logger.info(f"training algorithm: Scaffold")
-        
-        # initialize c_global
-        #c_global = TCNModel(num_inputs=3, num_channels=[64,128,256], num_class=args.n_class, kernel_size=3)
-        c_global = create_model(args.n_class)
-        c_global.eval()
-        for param in c_global.parameters():
-            param.requires_grad = False
-        
-        # initialize c_model
-        for client in train_clients.values():
-            #client.c_model = TCNModel(num_inputs=3, num_channels=[64,128,256], num_class=args.n_class, kernel_size=3)
-            client.c_model =create_model(args.n_class)
-            client.c_model.eval()
-            for param in client.c_model.parameters():
-                param.requires_grad = False
-            client.c_model.load_state_dict(c_global.state_dict())
-        
-        for round in range(n_comm_rounds):
-            logger.info("in comm round:" + str(round))
-            print("in comm round:" + str(round))
-            
-            party_list_this_round = party_list_rounds[round]
-            
-            # initialize delta key
-            total_delta = copy.deepcopy(global_model.state_dict())
-            for key in total_delta:
-                total_delta[key] = 0.0
-                
-            global_model.eval()
-            for param in global_model.parameters():
-                param.requires_grad = False
-            global_w = global_model.state_dict()
-            
-            clients_this_round = {k: train_clients[k] for k in party_list_rounds[round]}
-            
-            # update local model with global model
-            train_results = []
-            test_results = []
-            # apply lr scheduler to avoid gradient explode
-            if args.scheduler:
-                args.lr = schedule_learning_rate(args.lr, round, args.scheduler_epoch)
-            for client in clients_this_round.values():
-                logger.info(f"local training client {client.id}..")
-                print(f"local training client {client.id}..")
-                client.model.load_state_dict(global_w)
-                # do local training
-                trainacc,testacc = client.local_train_net(args, global_model, round=round, loss_fn=loss_fn, c_global=c_global)
-                train_results.append(trainacc)
-                test_results.append(testacc)
-                
-                # update total_delta
-                for key in total_delta:
-                    total_delta[key] += client.delta_para[key]
-            
-            logger.info("done local training " + str(round))
-            print("done local training "+ str(round))
-            
-            logger.info(f'Average train results: {dict_mean(train_results)}')
-            logger.info(f'Average test results: {dict_mean(test_results)}')
-            
-            # update total_delta
-            for key in total_delta:
-                total_delta[key] /= len(train_clients_index)
-            
-            # update c_global    
-            c_global_para = copy.deepcopy(c_global.state_dict())
-            for key in c_global_para:
-                if c_global_para[key].type() == 'torch.LongTensor':
-                    c_global_para[key] += total_delta[key].type(torch.LongTensor)
-                elif c_global_para[key].type() == 'torch.cuda.LongTensor':
-                    c_global_para[key] += total_delta[key].type(torch.cuda.LongTensor)
-                else:
-                    #print(c_global_para[key].type())
-                    c_global_para[key] += total_delta[key].cpu()
-            c_global.load_state_dict(c_global_para)
-
-            # do averaging for the global model
-            total_data_points = sum([len(client)for client in clients_this_round.values()])
-            fed_avg_freqs = [len(client)/ total_data_points for client in clients_this_round.values()]
-
-            for net_id, client in enumerate(clients_this_round.values()):
-                net_para = client.model.state_dict()
-                if net_id == 0:
-                    for key in net_para:
-                        global_w[key] = net_para[key] * fed_avg_freqs[net_id]
-                else:
-                    for key in net_para:
-                        global_w[key] += net_para[key] * fed_avg_freqs[net_id]
-                        
-             # update global model  
-            global_model.load_state_dict(global_w)
-            
-            logger.info(f'global n_test: {len(server_test_dataloader.sampler)}')
-            global_model.to(args.device)
-            train_global_results, train_conf_matrix = test(global_model, server_train_dataloader, get_confusion_matrix=True, loss_fn=loss_fn, device=device)
-            test_global_results, test_conf_matrix = test(global_model, server_test_dataloader, get_confusion_matrix=True, loss_fn=loss_fn, device=device)
-            global_model.to('cpu')
-            
-            logger.info(f">> Global Model Test results: {test_global_results}")
-            print(f">> Global Model Test results: {test_global_results}")
-            logger.info(f">> Global Model Train results: {train_global_results}")
-            print(f">> Global Model Train results: {train_global_results}")
-            
-            # save metrics
-            metrics_recorder.save_metric(test_global_results ,dict_mean(test_results))
-            
-            # record best f1
-            if best_f1< test_global_results["f1"]:
-                best_f1 = test_global_results["f1"]
-            
-            valid_loss = test_global_results["loss"]
-            if valid_loss <= valid_loss_min:
-                print('Validation loss decreased ({:.6f} --> {:.6f}).  Saving model ...'.format(
-                valid_loss_min,
-                valid_loss))
-                torch.save(global_model.state_dict(), f'models/{args.dataset}_{args.alg}.pt')
-                valid_loss_min = valid_loss
                 
     # last federated validation result
     test_results = []

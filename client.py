@@ -360,9 +360,9 @@ class Client():
         # if add data augmentation
         
         
-        # for moon algorithm
+        # for contrastive learning algorithm
         self.previous_model = None
-        # for scaffold
+        # for control variates
         self.c_model = None
         self.delta_para = None
         
@@ -400,11 +400,7 @@ class Client():
             trainacc, testacc = self.train_net_fedavg(1, args.lr, args.optimizer, loss_fn, args, device=self.device)
         elif args.alg == 'fedprox':
             trainacc, testacc = self.train_net_fedprox(global_model, n_epoch, args.lr,args.optimizer, args.mu, loss_fn, args, device=self.device)
-        elif args.alg == 'moon':
-            trainacc, testacc = self.train_net_fedcon(global_model,n_epoch, args.lr,args.optimizer, args.mu, args.temperature, loss_fn, args, round, device=self.device)
-        elif args.alg == 'scaffold':
-            trainacc, testacc = self.train_net_scaffold(global_model, c_global, n_epoch, args.lr,args.optimizer, loss_fn, args, device=self.device)
-        elif args.alg == 'proposed_moon_scaffold':
+        elif args.alg == 'fedcoad':
             trainacc, testacc = self.train_net_fedcoad(global_model, c_global, n_epoch, args.lr,args.optimizer, args.mu, args.temperature, loss_fn, args, round, device=self.device)
         
         logger.info(f"Client {self.id} final test {testacc}")
@@ -481,93 +477,6 @@ class Client():
         # if there are evaluations
         self.model.to('cpu')
         global_model.to('cpu')
-        
-        return train_acc,test_acc
-    
-    def train_net_scaffold(self, global_model, c_global, epochs, lr, args_optimizer, loss_fn, args, device="cpu"):
-        logger.info('n_training: %d' % len(self.train_loader.sampler))
-        train_acc = test(self.model, self.train_loader, device=device)
-        
-        if self.valid_loader is not None:
-            logger.info('n_test: %d' %len(self.valid_loader.sampler))
-            test_acc = test(self.model, self.valid_loader, device=device)
-            logger.info('>> Pre-Training Test accuracy: {}'.format(test_acc))
-            
-        logger.info('>> Pre-Training Training accuracy: {}'.format(train_acc))
-        
-        self.model.to(device)
-        self.c_model.to(device)
-        global_model.to(device)
-        c_global.to(device)
-        
-        self.model.train()
-        
-        if args_optimizer == 'adam':
-            optimizer = optim.Adam(filter(lambda p: p.requires_grad, self.model.parameters()), lr=lr, weight_decay=args.reg)
-        elif args_optimizer == 'amsgrad':
-            optimizer = optim.Adam(filter(lambda p: p.requires_grad, self.model.parameters()), lr=lr, weight_decay=args.reg,
-                                amsgrad=True)
-        elif args_optimizer == 'sgd':
-            optimizer = optim.SGD(filter(lambda p: p.requires_grad, self.model.parameters()), lr=lr, momentum=0.9,
-                                weight_decay=args.reg)
-        
-        criterion = loss_fn
-        
-        c_global_para = c_global.state_dict()
-        c_local_para = self.c_model.state_dict()
-        
-        cnt = 0
-        
-        for epoch in range(epochs):
-            epoch_loss_collector = []
-            for batch_idx, (x, target) in enumerate(self.train_loader):
-                x, target = x.to(device), target.to(device)
-                optimizer.zero_grad()
-                target = target.long()
-                
-                _, _, out, _ = self.model(x)
-                
-                loss = criterion(out, target)
-                loss.backward()
-                optimizer.step()
-                
-                net_para = self.model.state_dict()
-                for key in net_para:
-                    net_para[key] = net_para[key] - args.lr * (c_global_para[key] - c_local_para[key])
-                self.model.load_state_dict(net_para)
-
-                cnt += 1
-                epoch_loss_collector.append(loss.item())
-            
-            epoch_loss = sum(epoch_loss_collector) / len(epoch_loss_collector)
-            logger.info('Epoch: %d Loss: %f' % (epoch, epoch_loss))
-        
-        # update c_model
-        c_new_para = self.c_model.state_dict()
-        self.delta_para = copy.deepcopy(self.c_model.state_dict())
-        global_model_para = global_model.state_dict()
-        net_para = self.model.state_dict()
-        
-        for key in net_para:
-            c_new_para[key] = c_new_para[key] - c_global_para[key] + (global_model_para[key] - net_para[key]) / (cnt * args.lr)
-            self.delta_para[key] = c_new_para[key] - c_local_para[key]
-        self.c_model.load_state_dict(c_new_para)
-        
-        # after training 
-        train_acc = test(self.model, self.train_loader, device=device)
-        
-        if self.valid_loader:
-            logger.info('n_test: %d' %len(self.valid_loader.sampler))
-            test_acc = test(self.model, self.valid_loader, device=device)
-            logger.info('>> After-Training Test accuracy: {}'.format(test_acc))
-            
-        logger.info('>> After-Training Training accuracy: {}'.format(train_acc))
-        
-        # return to cpu
-        self.model.to('cpu')
-        self.c_model.to('cpu')
-        global_model.to('cpu')
-        c_global.to("cpu")
         
         return train_acc,test_acc
         
@@ -748,97 +657,6 @@ class Client():
         global_model.to('cpu')
         self.c_model.to('cpu')
         c_global.to("cpu")
-        
-        return train_acc,test_acc
-        
-        
-    def train_net_fedcon(self, global_model, epochs, lr, args_optimizer, mu, temperature, loss_fn, args, round, device="cpu"):
-            
-        logger.info('n_training: %d' % len(self.train_loader.sampler))
-        train_acc = test(self.model, self.train_loader, device=device)
-        
-        if self.valid_loader is not None:
-            logger.info('n_test: %d' %len(self.valid_loader.sampler))
-            test_acc = test(self.model, self.valid_loader, device=device)
-            logger.info('>> Pre-Training Test accuracy: {}'.format(test_acc))
-            
-        logger.info('>> Pre-Training Training accuracy: {}'.format(train_acc))
-        
-        self.model.to(device)
-        self.previous_model.to(device)
-        global_model.to(device)
-        
-        self.model.train()
-
-        if args_optimizer == 'adam':
-            optimizer = optim.Adam(filter(lambda p: p.requires_grad, self.model.parameters()), lr=lr, weight_decay=args.reg)
-        elif args_optimizer == 'amsgrad':
-            optimizer = optim.Adam(filter(lambda p: p.requires_grad, self.model.parameters()), lr=lr, weight_decay=args.reg,
-                                amsgrad=True)
-        elif args_optimizer == 'sgd':
-            optimizer = optim.SGD(filter(lambda p: p.requires_grad, self.model.parameters()), lr=lr, momentum=0.9,
-                                weight_decay=args.reg)
-            
-
-        criterion = loss_fn
-        cos=torch.nn.CosineSimilarity(dim=-1)
-        # mu = 0.001
-
-        for epoch in range(epochs):
-            epoch_loss_collector = []
-            epoch_loss1_collector = []
-            epoch_loss2_collector = []
-            for batch_idx, (x, target) in enumerate(self.train_loader):
-                x, target = x.to(device), target.to(device)
-                optimizer.zero_grad()
-                #x.requires_grad = False
-                #target.requires_grad = False
-                target = target.long()
-
-                _, pro1, out, _ = self.model(x)
-                _, pro2, _, _ = global_model(x)
-
-                posi = cos(pro1, pro2)
-                logits = posi.reshape(-1,1)
-
-                _, pro3, _, _ = self.previous_model(x)
-                nega = cos(pro1, pro3)
-                logits = torch.cat((logits, nega.reshape(-1,1)), dim=1)
-
-                logits /= temperature
-                labels = torch.zeros(x.size(0)).cuda().long()
-
-                loss2 = mu * criterion(logits, labels)
-
-                loss1 = criterion(out, target)
-                loss = loss1 + loss2
-
-                loss.backward()
-                optimizer.step()
-
-                epoch_loss_collector.append(loss.item())
-                epoch_loss1_collector.append(loss1.item())
-                epoch_loss2_collector.append(loss2.item())
-
-            epoch_loss = sum(epoch_loss_collector) / len(epoch_loss_collector)
-            epoch_loss1 = sum(epoch_loss1_collector) / len(epoch_loss1_collector)
-            epoch_loss2 = sum(epoch_loss2_collector) / len(epoch_loss2_collector)
-            logger.info('Epoch: %d Loss: %f Loss1: %f Loss2: %f' % (epoch, epoch_loss, epoch_loss1, epoch_loss2))
-        
-        # after training 
-        train_acc = test(self.model, self.train_loader, device=device)
-        
-        if self.valid_loader:
-            logger.info('n_test: %d' %len(self.valid_loader.sampler))
-            test_acc = test(self.model, self.valid_loader, device=device)
-            logger.info('>> After-Training Test accuracy: {}'.format(test_acc))
-            
-        logger.info('>> After-Training Training accuracy: {}'.format(train_acc))
-        
-        # if there are evaluations
-        self.model.to('cpu')
-        self.previous_model.to('cpu')
-        global_model.to('cpu')
         
         return train_acc,test_acc
 
